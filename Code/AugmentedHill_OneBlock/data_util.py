@@ -23,7 +23,7 @@ def generate_data(n, num_samples):
 
     for s in range(num_samples):
         Cp = (K[0] @ P[s] + K[1]) % MOD
-        C[s] = Cp ^ K[2]
+        C[s] = Cp ^ K[2] # bitwise XOR 
         
     return P, C, K
 

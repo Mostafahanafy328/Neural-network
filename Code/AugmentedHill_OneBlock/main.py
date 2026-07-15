@@ -16,8 +16,15 @@ EPOCHS = con.Epoch
 LR = con.LR
 NUM_SAMPLES = con.num_sample
 
+# Two-phase training parameters
+PHASE1_EPOCHS = 200  # Phase 1: Train with frozen models
+PHASE1_LR = LR  # Normal learning rate
+PHASE2_LR = LR / 100  # Slower training for the second phase 
+
 # Dataset
 
+# TODO: one of the visualizations is to look at the distribution of the letters in P. 
+# This might be important to understand how the model is learning the distribution of the letters in P. 
 P, C, K = du.generate_data(BLOCK_SIZE, NUM_SAMPLES)
 
 P_flat = P.reshape(NUM_SAMPLES, BLOCK_SIZE * BLOCK_SIZE)
@@ -56,25 +63,56 @@ def get_temperature(epoch, total_epochs):
 
 criterion = nn.CrossEntropyLoss()
 
-MAX_ATTEMPTS = 20
-SUCCESS_THRESHOLD = 95
+MAX_ATTEMPTS = 2
+SUCCESS_THRESHOLD = 80
 
 attempt = 0
 success = False
 Best=0
+
 while attempt < MAX_ATTEMPTS and not success:
 
     attempt += 1
     print(f"\n{'='*20} Attempt {attempt} {'='*20}")
 
     model = M.AugmentedHillNet(n=BLOCK_SIZE, mod=MOD)
-    optimizer = torch.optim.Adam([model.keys], lr=LR)
-    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-
+    optimizer = torch.optim.Adam(model.parameters(), lr=PHASE1_LR)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    
+    phase2_started = False
+    
     train_losses = []
     val_losses = []
 
     for epoch in range(EPOCHS):
+        
+        # # Gentle temperature annealing for frozen models
+        # # Keep soft initially (high temperature), then very gently sharpen
+        # progress = epoch / EPOCHS
+        
+        # # Schedule: Keep at 1.0 for first 50% of training
+        # # Then gently descent from 1.0 to 0.3 in second 50%
+        # if progress < 0.5:
+        #     temperature = 1.0
+        # else:
+        #     # Gentle descent: 1.0 -> 0.3 over 50% of training
+        #     descent_progress = (progress - 0.5) / 0.5  # 0 to 1
+        #     temperature = 1.0 - (1.0 - 0.3) * descent_progress  # 1.0 to 0.3
+
+        # Phase switching: Unfreeze individual models and lower learning rate after PHASE1_EPOCHS
+        if epoch == PHASE1_EPOCHS and not phase2_started:
+            print(f"SWITCHING TO PHASE 2: Unfreezing models, lowering LR to {PHASE2_LR}")
+            
+            # Unfreeze the models
+            for net in (M.mul_model, M.add_model, M.xor_model):
+                for p in net.parameters():
+                    p.requires_grad = True
+            
+            # Lower the learning rate for the current optimizer
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = PHASE2_LR
+            
+            phase2_started = True
 
         model.train()
         #T = get_temperature(epoch, EPOCHS)
@@ -83,8 +121,8 @@ while attempt < MAX_ATTEMPTS and not success:
         for X_batch, Y_batch in train_loader:
 
             optimizer.zero_grad()
-            #out = model(X_batch,temperature=T)   # (B, block_size, n*n, MOD)
-            out = model(X_batch)
+            # out = model(X_batch, temperature=temperature) # B x n*n x MOD
+            out = model(X_batch) # B x n*n x MOD
             loss = 0
 
             for i in range(BLOCK_SIZE * BLOCK_SIZE):
@@ -112,6 +150,14 @@ while attempt < MAX_ATTEMPTS and not success:
             print(f"\nEpoch {epoch+1:03d}")
             print(f"Loss = {avg_train_loss:.4f}")
             print(f"Accuracy = {Accuracy:.2f}%")
+            
+            # Monitor key sharpness
+            with torch.no_grad():
+                for i in range(3):
+                    key_probs = F.softmax(model.keys[i], dim=2)
+                    max_prob = key_probs.max(dim=2).values.mean()
+                    print(f"  K[{i}] confidence (mean): {max_prob:.4f}", end=" ")
+                print()
         
         # -------- Validation --------
         model.eval()
@@ -168,6 +214,16 @@ for i in range(3):
     print(K[i])
     print(f"Learned K[{i}]")
     print(learned_keys[i].numpy())
+    
+    # Calculate accuracy of key matching
+    key_match = (K[i] == learned_keys[i].numpy()).mean() * 100
+    print(f"Key Match Accuracy: {key_match:.2f}%")
+    
+    # Check key confidence (how sharp are the softmax distributions?)
+    key_probs = F.softmax(model.keys[i], dim=2)
+    max_probs = key_probs.max(dim=2).values
+    print(f"Key confidence (mean max prob): {max_probs.mean():.4f} (higher = sharper)")
+    print(f"Key confidence (min): {max_probs.min():.4f}, max: {max_probs.max():.4f}")
 
 # Test
 
